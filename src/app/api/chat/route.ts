@@ -1,37 +1,32 @@
-import { NextResponse } from "next/server";
-import { createClient } from "@deepgram/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-export async function GET() {
-  const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
-  const deepgramProjectId = process.env.DEEPGRAM_PROJECT_ID;
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-  if (!deepgramApiKey || !deepgramProjectId) {
-    return NextResponse.json(
-      { error: "Deepgram API key or Project ID not found in environment variables." },
-      { status: 500 }
-    );
-  }
+export const runtime = "edge";
 
-  const deepgram = createClient(deepgramApiKey);
-
+export async function POST(req: Request) {
   try {
-    // The correct method is deepgram.manage.keys.create
-    const { key, error } = await deepgram.manage.keys.create(
-      deepgramProjectId, // Use the Project ID here
-      "Temporary key for client",
-      ["usage:write"],
-      { timeToLiveInSeconds: 60 } // Key is valid for 1 minute
-    );
+    const { prompt } = await req.json();
 
-    if (error) {
-      console.error("Deepgram key creation error:", error);
-      throw new Error(error.message);
-    }
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+    const streamingResponse = await model.generateContentStream(prompt);
     
-    return NextResponse.json({ key });
+    const stream = new ReadableStream({
+        async start(controller) {
+            for await (const chunk of streamingResponse.stream) {
+                const chunkText = chunk.text();
+                controller.enqueue(chunkText);
+            }
+            controller.close();
+        },
+    });
 
-  } catch (error: any) {
-    console.error("Error in Deepgram API route:", error.message);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return new Response(stream);
+
+  } catch (error) {
+    console.error("Error in Gemini API route:", error);
+    const errorMessage = error instanceof Error ? error.message : "An unknown error occurred";
+    return new Response(`Error from Gemini API: ${errorMessage}`, { status: 500 });
   }
 }

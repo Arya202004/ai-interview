@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-// This is the ID for the "Rachel" voice. You can find other voice IDs on the ElevenLabs website.
 const VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; 
 
 export async function POST(req: Request) {
@@ -14,8 +13,6 @@ export async function POST(req: Request) {
     if (!text) {
       return NextResponse.json({ error: "Text is required" }, { status: 400 });
     }
-
-    console.log(`SERVER LOG: Generating audio for text: "${text}"`);
     
     const elevenLabsUrl = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`;
 
@@ -36,17 +33,17 @@ export async function POST(req: Request) {
       throw new Error(`ElevenLabs API failed with status ${response.status}: ${errorText}`);
     }
 
-    // The response body is the audio stream itself.
     return new Response(response.body, {
       headers: {
         "Content-Type": "audio/mpeg",
       },
     });
 
-  } catch (error: any) {
+  } catch (error) {
     console.error("SERVER LOG: Full error in TTS route:", error);
+    const errorMessage = error instanceof Error ? error.message : "An unknown error occurred";
     return NextResponse.json(
-      { error: `TTS generation failed: ${error.message}` },
+      { error: `TTS generation failed: ${errorMessage}` },
       { status: 500 }
     );
   }

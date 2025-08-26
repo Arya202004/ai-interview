@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import Script from "next/script"; // 1. Import the Script component
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -17,8 +18,8 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        {/* Add this script tag to load Tailwind CSS from the CDN */}
-        <script src="https://cdn.tailwindcss.com"></script>
+        {/* 2. Use the Script component for Tailwind CDN */}
+        <Script src="https://cdn.tailwindcss.com" strategy="beforeInteractive" />
       </head>
       <body className={`${inter.className} min-h-screen flex items-center justify-center`}>
         {children}

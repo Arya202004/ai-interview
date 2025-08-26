@@ -1,6 +1,6 @@
 'use client'; 
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import AvatarCanvas from "@/components/canvas/AvatarCanvas";
@@ -17,8 +17,14 @@ interface InterviewTurn {
 // Define the different screens/states of the application
 type AppScreen = "welcome" | "role_selection" | "generating_questions" | "interviewing" | "generating_feedback" | "feedback_display";
 
+// Define the more detailed states for the interview footer
+type InterviewState = "idle" | "asking_question" | "listening_to_answer" | "processing_answer";
+
+
 export default function Home() {
+  // --- State Management ---
   const [screen, setScreen] = useState<AppScreen>("welcome");
+  const [interviewState, setInterviewState] = useState<InterviewState>("idle");
   const [userName, setUserName] = useState("");
   const [interviewRole, setInterviewRole] = useState("");
   const [interviewData, setInterviewData] = useState<InterviewTurn[]>([]);
@@ -29,21 +35,25 @@ export default function Home() {
   const { isRecording, startRecording, stopRecording } = useAudioRecorder();
   const feedbackReportRef = useRef<HTMLDivElement>(null);
 
-  const speak = (text: string, onEndCallback: () => void = () => {}) => {
+  // --- Core Functions ---
+
+  const speak = useCallback((text: string, onEndCallback: () => void = () => {}) => {
     setAiResponse(text);
     if (typeof window !== 'undefined' && window.speechSynthesis) {
+      // Cancel any ongoing speech to prevent overlap
+      window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.onend = onEndCallback;
       window.speechSynthesis.speak(utterance);
     }
-  };
+  }, []);
   
-  const handleNameSubmit = (e: React.FormEvent) => {
+  const handleNameSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (userName.trim()) setScreen("role_selection");
-  };
+  }, [userName]);
   
-  const handleRoleSelection = async (role: string) => {
+  const handleRoleSelection = useCallback(async (role: string) => {
     setInterviewRole(role);
     setScreen("generating_questions");
     try {
@@ -64,9 +74,10 @@ export default function Home() {
       console.error("Error in handleRoleSelection:", error);
       setScreen("role_selection"); 
     }
-  };
+  }, [userName]);
 
-  const processAnswer = async (audioBlob: Blob) => {
+  const processAnswer = useCallback(async (audioBlob: Blob) => {
+    setInterviewState("processing_answer");
     setUserTranscript("Processing your answer...");
     const formData = new FormData();
     formData.append("file", audioBlob, "audio.webm");
@@ -78,19 +89,22 @@ export default function Home() {
         const data = await response.json();
         const userAnswer = data.transcript;
 
-        const updatedData = [...interviewData];
-        updatedData[currentQuestionIndex].userAnswer = userAnswer;
-        setInterviewData(updatedData);
+        setInterviewData(prevData => {
+            const updatedData = [...prevData];
+            updatedData[currentQuestionIndex].userAnswer = userAnswer;
+            return updatedData;
+        });
         setUserTranscript(userAnswer);
 
         setCurrentQuestionIndex(prev => prev + 1);
     } catch (error) {
         console.error("Error processing answer:", error);
+        // Still move to the next question even if transcription fails
         setCurrentQuestionIndex(prev => prev + 1);
     }
-  };
+  }, [currentQuestionIndex]);
   
-  const handleToggleRecording = async () => {
+  const handleToggleRecording = useCallback(async () => {
     if (isRecording) {
       const audioBlob = await stopRecording();
       if (audioBlob && audioBlob.size > 2000) {
@@ -102,9 +116,9 @@ export default function Home() {
       setUserTranscript(""); 
       startRecording();
     }
-  };
-  // Fetches the final feedback from the backend
-  const generateFeedback = async () => {
+  }, [isRecording, processAnswer, startRecording, stopRecording]);
+
+  const generateFeedback = useCallback(async () => {
     try {
         const response = await fetch('/api/gemini-text', {
             method: 'POST',
@@ -115,17 +129,24 @@ export default function Home() {
                 task: 'generate_feedback'
             }),
         });
-        if(!response.ok) throw new Error("Failed to generate feedback.");
-        const data = await response.json();
-        setFeedback(data.feedback);
+        if(!response.ok || !response.body) throw new Error("Failed to generate feedback.");
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let feedbackText = "";
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value);
+            feedbackText += chunk;
+            setFeedback(feedbackText);
+        }
         setScreen("feedback_display");
     } catch (error) {
         console.error("Error generating feedback:", error);
     }
-  };
+  }, [interviewData, interviewRole]);
 
-  // Handles the PDF download functionality
-  const handleDownloadPdf = () => {
+  const handleDownloadPdf = useCallback(() => {
     const input = feedbackReportRef.current;
     if (input) {
       html2canvas(input, { scale: 2 }).then((canvas) => {
@@ -137,24 +158,23 @@ export default function Home() {
         pdf.save(`${userName}_Interview_Feedback.pdf`);
       });
     }
-  };
+  }, [userName]);
 
   // Main effect to control the flow of the interview
   useEffect(() => {
     if (screen === 'interviewing' && interviewData.length > 0) {
       if (currentQuestionIndex >= interviewData.length) {
-        // Interview is over
         setScreen("generating_feedback");
         speak("Thank you. The interview is now complete. Please wait while I generate your feedback.", () => {
           generateFeedback();
         });
       } else {
-        // Ask the next question
+        setInterviewState("asking_question");
         const currentQuestion = interviewData[currentQuestionIndex].question;
-        speak(currentQuestion);
+        speak(currentQuestion, () => setInterviewState("listening_to_answer"));
       }
     }
-  }, [screen, interviewData, currentQuestionIndex]);
+  }, [screen, interviewData, currentQuestionIndex, speak, generateFeedback]);
 
   // --- RENDER LOGIC ---
 
@@ -182,12 +202,11 @@ export default function Home() {
   if (screen === 'feedback_display') {
     return (
         <div className="flex items-center justify-center min-h-screen bg-gray-100 p-4">
-            <div className="w-full max-w-4xl bg-white rounded-2xl shadow-xl p-8 m-4">
+            <div className="w-full max-w-4xl bg-white rounded-2xl shadow-xl p-8 m-4 overflow-y-auto">
                 <div ref={feedbackReportRef} className="p-4 text-gray-800">
                     <h1 className="text-3xl font-bold text-center mb-2">Interview Feedback for {userName}</h1>
                     <h2 className="text-xl text-center text-gray-600 mb-8">Role: {interviewRole}</h2>
-                    <div className="whitespace-pre-wrap font-sans">
-                        {feedback}
+                    <div className="whitespace-pre-wrap font-sans" dangerouslySetInnerHTML={{ __html: feedback.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n\*/g, '<br/>&bull;') }}>
                     </div>
                 </div>
                 <div className="text-center mt-8">
@@ -200,7 +219,6 @@ export default function Home() {
     );
   }
 
-  // --- Render Main Interview Screen (Role Selection, Generating, and Interviewing) ---
   return (
     <div className="w-full max-w-7xl bg-white/70 backdrop-blur-xl rounded-2xl shadow-lg p-6 md:p-8 m-4">
       <header className="flex justify-between items-center pb-4 border-b border-gray-200">
@@ -225,7 +243,7 @@ export default function Home() {
 
       {(screen === 'generating_questions' || screen === 'generating_feedback') && (
         <div className="text-center py-16">
-            <h2 className="text-2xl font-semibold animate-pulse">{screen === 'generating_questions' ? `Generating questions for you, ${userName}...` : 'Analyzing your answers and generating feedback...'}</h2>
+            <h2 className="text-2xl font-semibold animate-pulse">{screen === 'generating_questions' ? `Generating questions...` : 'Analyzing your answers...'}</h2>
             <p className="text-gray-600">Please wait a moment.</p>
         </div>
       )}
@@ -253,18 +271,21 @@ export default function Home() {
             </div>
             <footer className="mt-6 flex justify-between items-center bg-gray-100 rounded-lg p-4 min-h-[80px]">
                 <p className="text-gray-600 font-medium">
-                    {isRecording ? "Recording your answer..." : "Ready for your answer."}
+                    {interviewState === 'asking_question' && 'Interviewer is speaking...'}
+                    {interviewState === 'listening_to_answer' && (isRecording ? 'Recording your answer...' : 'Ready for your answer.')}
+                    {interviewState === 'processing_answer' && 'Processing your answer...'}
                 </p>
                 <button 
                     onClick={handleToggleRecording}
-                    disabled={userTranscript === "Processing your answer..."} 
+                    // This is the corrected logic
+                    disabled={interviewState !== 'listening_to_answer'}
                     className={`font-semibold px-6 py-2 rounded-lg transition-colors ${
                         isRecording 
                         ? 'bg-red-500 hover:bg-red-600' 
                         : 'bg-green-500 hover:bg-green-600'
-                    } text-white disabled:bg-gray-400`}
+                    } text-white disabled:bg-gray-400 disabled:cursor-not-allowed`}
                 >
-                    {isRecording ? 'Recording...' : 'Start Recording'}
+                    {isRecording ? 'Stop Recording' : 'Start Recording'}
                 </button>
             </footer>
         </>

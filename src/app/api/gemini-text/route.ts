@@ -18,31 +18,37 @@ export async function POST(req: Request) {
       prompt = `You are an expert AI hiring manager for the role of a "${role}". Generate 10 diverse interview questions with brief expected answers. Return ONLY a valid JSON object: {"interviewData":[{"question":"...", "expectedAnswer":"..."}, ...]}. Do not include markdown or any other text.`;
     } else if (task === 'generate_feedback' && interviewData) {
       prompt = `You are an expert AI hiring manager. The user has completed an interview for the role of a "${role}".
-      Analyze the provided interview data, which includes the question, the user's answer, and the ideal answer.
-      Provide constructive feedback in the following format:
+      Analyze the provided interview data: ${JSON.stringify(interviewData)}.
+      Provide constructive feedback in a clean, readable format with Markdown for headings and lists:
       1.  **Overall Score:** A score out of 100.
-      2.  **Overall Summary:** A brief, 2-3 sentence summary of the user's performance, highlighting strengths and areas for improvement.
-      3.  **Per-Question Analysis:** A bulleted list where you briefly analyze the user's answer for each question compared to the ideal answer.
-
-      Return ONLY the feedback as a clean string. Do not use JSON or Markdown.`;
+      2.  **Overall Summary:** A brief, 2-3 sentence summary of the user's performance.
+      3.  **Per-Question Analysis:** A bulleted list analyzing the user's answer for each question.`;
     } else {
       return NextResponse.json({ error: "Invalid task or missing data." }, { status: 400 });
     }
     
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
-    
-    // For question generation, we expect JSON. For feedback, we expect text.
     if (task === 'generate_questions') {
+      const result = await model.generateContent(prompt);
+      const responseText = result.response.text();
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);
       if (!jsonMatch) throw new Error("No valid JSON object in Gemini's response.");
       return NextResponse.json(JSON.parse(jsonMatch[0]));
-    } else {
-      return NextResponse.json({ feedback: responseText });
+    } else { // Streaming for feedback
+      const result = await model.generateContentStream(prompt);
+      const stream = new ReadableStream({
+          async start(controller) {
+              for await (const chunk of result.stream) {
+                  const chunkText = chunk.text();
+                  controller.enqueue(chunkText);
+              }
+              controller.close();
+          },
+      });
+      return new Response(stream);
     }
-
-  } catch (error: any) {
+  } catch (error) {
     console.error("SERVER LOG: Error in gemini-text route:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const errorMessage = error instanceof Error ? error.message : "An unknown error occurred";
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }

@@ -10,7 +10,6 @@ async function blobToBase64(blob: Blob): Promise<string> {
 
 export async function POST(req: Request) {
   try {
-    // Correctly parse the incoming data as FormData
     const formData = await req.formData();
     const file = formData.get("file") as Blob | null;
     const task = formData.get("task") as "transcribe_answer" | null;
@@ -29,7 +28,6 @@ export async function POST(req: Request) {
       inlineData: { mimeType: file.type, data: base64Audio },
     };
     
-    // The prompt for transcribing an answer
     const prompt: Part = {
       text: "Transcribe the user's audio response clearly and accurately. Return ONLY the transcribed text, with no extra commentary or labels.",
     };
@@ -41,9 +39,9 @@ export async function POST(req: Request) {
     
     return NextResponse.json({ transcript: responseText });
 
-  } catch (error: any) {
-    // Corrected the log message to be accurate
+  } catch (error) {
     console.error("SERVER LOG: Error in gemini-audio route:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const errorMessage = error instanceof Error ? error.message : "An unknown error occurred";
+    return NextResponse.json({ error: errorMessage }, { status: 500 });
   }
 }
