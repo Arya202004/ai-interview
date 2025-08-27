@@ -6,23 +6,16 @@ import html2canvas from "html2canvas";
 import AvatarCanvas from "@/components/canvas/AvatarCanvas";
 import UserVideo from "@/components/UserVideo";
 import { useAudioRecorder } from "@/hooks/useAudioRecorder"; 
+import { useAvatarStore } from '@/store/avatarStore'; // Correctly import the main store hook
+import { generateVisemes } from '@/lib/lipsync'; // Correctly import the viseme generator
 
-// Define the structure for each turn of the interview
-interface InterviewTurn {
-  question: string;
-  expectedAnswer: string;
-  userAnswer?: string;
-}
-
-// Define the different screens/states of the application
-type AppScreen = "welcome" | "role_selection" | "generating_questions" | "interviewing" | "generating_feedback" | "feedback_display";
-
-// Define the more detailed states for the interview footer
+// --- INTERFACES AND TYPES ---
+interface InterviewTurn { question: string; expectedAnswer: string; userAnswer?: string; }
+type AppScreen = "welcome" | "role_selection" | "device_check" | "pre_notes" | "generating_questions" | "interviewing" | "generating_feedback" | "feedback_display";
 type InterviewState = "idle" | "asking_question" | "listening_to_answer" | "processing_answer";
 
-
 export default function Home() {
-  // --- State Management ---
+  // --- STATE MANAGEMENT ---
   const [screen, setScreen] = useState<AppScreen>("welcome");
   const [interviewState, setInterviewState] = useState<InterviewState>("idle");
   const [userName, setUserName] = useState("");
@@ -34,53 +27,120 @@ export default function Home() {
   const [feedback, setFeedback] = useState("");
   const { isRecording, startRecording, stopRecording } = useAudioRecorder();
   const feedbackReportRef = useRef<HTMLDivElement>(null);
+  const [agreed, setAgreed] = useState(false);
+  // Device check (audio meter)
+  const [micLevel, setMicLevel] = useState(0);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micAnalyzerCleanupRef = useRef<() => void>(() => {});
+  const [cameraReady, setCameraReady] = useState(false);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
 
-  // --- Core Functions ---
+  // --- CORRECTED STORE USAGE ---
+  const playAudioWithVisemes = useAvatarStore((state) => state.playAudioWithVisemes);
+  const playVisemesOnly = useAvatarStore((state) => state.playVisemesOnly);
+  const stopAudio = useAvatarStore((state) => state.stopAudio);
 
-  const speak = useCallback((text: string, onEndCallback: () => void = () => {}) => {
+  // --- CORE FUNCTIONS ---
+  const speak = useCallback(async (text: string, onEndCallback: () => void = () => {}) => {
     setAiResponse(text);
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      // Cancel any ongoing speech to prevent overlap
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.onend = onEndCallback;
-      window.speechSynthesis.speak(utterance);
+    stopAudio(); // This will now work correctly
+    const visemes = generateVisemes(text);
+
+    // TTS provider switch via env
+    const provider = process.env.NEXT_PUBLIC_TTS_PROVIDER || 'browser';
+    try {
+      if (provider === 'google' || provider === 'opentts') {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (res.ok) {
+          const arrayBuf = await res.arrayBuffer();
+          const contentType = res.headers.get('Content-Type') || 'audio/mpeg';
+          const audioBlob = new Blob([arrayBuf], { type: contentType });
+          playAudioWithVisemes(audioBlob, visemes);
+          onEndCallback();
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('[TTS] Google TTS failed, falling back to browser TTS.', err);
     }
-  }, []);
+
+    // Fallback: browser SpeechSynthesis
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      playVisemesOnly(visemes);
+      const utterance = new SpeechSynthesisUtterance(text);
+      // Prefer Indian English male if available, else closest English
+      const pickVoice = () => {
+        const voices = window.speechSynthesis.getVoices();
+        const byLang = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('en-in'));
+        const byMale = byLang.find(v => /male/i.test(v.name)) || byLang[0];
+        if (byMale) return byMale;
+        const en = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('en'));
+        return en.find(v => /male|google uk english male|english india/i.test(v.name)) || en[0] || voices[0];
+      };
+      const assignVoice = () => {
+        const v = pickVoice();
+        if (v) utterance.voice = v;
+        utterance.rate = 0.95; // slightly slower, clearer
+        utterance.pitch = 0.95; // slightly lower for male tone
+        window.speechSynthesis.speak(utterance);
+      };
+      if (window.speechSynthesis.getVoices().length === 0) {
+        window.speechSynthesis.onvoiceschanged = () => assignVoice();
+      } else {
+        assignVoice();
+      }
+      utterance.onend = onEndCallback;
+    } else {
+      onEndCallback();
+    }
+  }, [playAudioWithVisemes, playVisemesOnly, stopAudio]);
   
-  const handleNameSubmit = useCallback((e: React.FormEvent) => {
-    e.preventDefault();
-    if (userName.trim()) setScreen("role_selection");
-  }, [userName]);
+  const handleNameSubmit = useCallback((e: React.FormEvent) => { e.preventDefault(); if (userName.trim()) setScreen("role_selection"); }, [userName]);
   
-  const handleRoleSelection = useCallback(async (role: string) => {
+  const handleRoleSelection = useCallback((role: string) => {
     setInterviewRole(role);
+    setAgreed(false);
+    setScreen("device_check");
+  }, []);
+
+  const beginInterview = useCallback(async () => {
     setScreen("generating_questions");
     try {
       const response = await fetch('/api/gemini-text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role, task: 'generate_questions' }),
+        body: JSON.stringify({ role: interviewRole, task: 'generate_questions' }),
       });
-      if(!response.ok) throw new Error("Failed to generate questions.");
+      if(!response.ok) {
+        const err = await response.json().catch(() => ({} as any));
+        throw new Error(err?.error || "Failed to generate questions.");
+      }
       const data = await response.json();
       if (Array.isArray(data.interviewData)) {
-        const firstQuestionText = `Thank you, ${userName}. I have prepared ${data.interviewData.length} questions for your ${role} interview. Let's begin. ${data.interviewData[0].question}`;
+        const firstQuestionText = `Thank you, ${userName}. I have prepared ${data.interviewData.length} questions for your ${interviewRole} interview. Let's begin. ${data.interviewData[0].question}`;
         data.interviewData[0].question = firstQuestionText;
         setInterviewData(data.interviewData);
         setScreen("interviewing");
       }
     } catch (error) {
-      console.error("Error in handleRoleSelection:", error);
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      console.error("Error in beginInterview:", msg);
+      alert(msg);
       setScreen("role_selection"); 
     }
-  }, [userName]);
+  }, [userName, interviewRole]);
 
   const processAnswer = useCallback(async (audioBlob: Blob) => {
     setInterviewState("processing_answer");
     setUserTranscript("Processing your answer...");
     const formData = new FormData();
-    formData.append("file", audioBlob, "audio.webm");
+    // Preserve actual blob type (ogg/webm) for server-side handling
+    const filename = audioBlob.type.includes('ogg') ? 'audio.ogg' : 'audio.webm';
+    formData.append("file", audioBlob, filename);
     formData.append("task", "transcribe_answer");
 
     try {
@@ -95,11 +155,9 @@ export default function Home() {
             return updatedData;
         });
         setUserTranscript(userAnswer);
-
         setCurrentQuestionIndex(prev => prev + 1);
     } catch (error) {
         console.error("Error processing answer:", error);
-        // Still move to the next question even if transcription fails
         setCurrentQuestionIndex(prev => prev + 1);
     }
   }, [currentQuestionIndex]);
@@ -123,11 +181,7 @@ export default function Home() {
         const response = await fetch('/api/gemini-text', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                role: interviewRole,
-                interviewData,
-                task: 'generate_feedback'
-            }),
+            body: JSON.stringify({ role: interviewRole, interviewData, task: 'generate_feedback' }),
         });
         if(!response.ok || !response.body) throw new Error("Failed to generate feedback.");
         const reader = response.body.getReader();
@@ -152,15 +206,31 @@ export default function Home() {
       html2canvas(input, { scale: 2 }).then((canvas) => {
         const imgData = canvas.toDataURL('image/png');
         const pdf = new jsPDF('p', 'mm', 'a4');
-        const pdfWidth = pdf.internal.pageSize.getWidth();
-        const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
-        pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
+        const pageWidth = pdf.internal.pageSize.getWidth();
+        const pageHeight = pdf.internal.pageSize.getHeight();
+        const imgWidth = pageWidth;
+        const imgHeight = (canvas.height * imgWidth) / canvas.width;
+        let heightLeft = imgHeight;
+        let position = 0;
+
+        // First page
+        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+        heightLeft -= pageHeight;
+        position -= pageHeight;
+
+        // Additional pages
+        while (heightLeft > 0) {
+          pdf.addPage();
+          pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+          heightLeft -= pageHeight;
+          position -= pageHeight;
+        }
+
         pdf.save(`${userName}_Interview_Feedback.pdf`);
       });
     }
   }, [userName]);
 
-  // Main effect to control the flow of the interview
   useEffect(() => {
     if (screen === 'interviewing' && interviewData.length > 0) {
       if (currentQuestionIndex >= interviewData.length) {
@@ -176,7 +246,129 @@ export default function Home() {
     }
   }, [screen, interviewData, currentQuestionIndex, speak, generateFeedback]);
 
+  // Device check: start mic analyzer
+  useEffect(() => {
+    if (screen !== 'device_check') return;
+    let audioCtx: AudioContext | null = null;
+    let analyser: AnalyserNode | null = null;
+    let source: MediaStreamAudioSourceNode | null = null;
+    let rafId: number | null = null;
+    const start = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStreamRef.current = stream;
+        audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        source = audioCtx.createMediaStreamSource(stream);
+        source.connect(analyser);
+        const buffer = new Uint8Array(analyser.frequencyBinCount);
+        const tick = () => {
+          if (!analyser) return;
+          analyser.getByteTimeDomainData(buffer);
+          let sum = 0;
+          for (let i = 0; i < buffer.length; i++) {
+            const v = (buffer[i] - 128) / 128;
+            sum += v * v;
+          }
+          const rms = Math.sqrt(sum / buffer.length);
+          setMicLevel(Math.min(1, rms * 3));
+          rafId = requestAnimationFrame(tick);
+        };
+        rafId = requestAnimationFrame(tick);
+        micAnalyzerCleanupRef.current = () => {
+          if (rafId) cancelAnimationFrame(rafId);
+          try { source?.disconnect(); analyser?.disconnect(); } catch {}
+          try { audioCtx?.close(); } catch {}
+        };
+      } catch (e) {
+        console.error('[DeviceCheck] Failed to init mic analyzer', e);
+      }
+
+      // Camera check
+      try {
+        const cam = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+        cameraStreamRef.current = cam;
+        setCameraReady(true);
+      } catch (e) {
+        console.error('[DeviceCheck] Failed to access camera', e);
+        setCameraReady(false);
+      }
+    };
+    start();
+    return () => {
+      micAnalyzerCleanupRef.current?.();
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach(t => t.stop());
+        micStreamRef.current = null;
+      }
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach(t => t.stop());
+        cameraStreamRef.current = null;
+      }
+    };
+  }, [screen]);
+
   // --- RENDER LOGIC ---
+  if (screen === 'device_check') {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-100">
+        <div className="p-8 bg-white rounded-lg shadow-xl text-center w-full max-w-2xl">
+          <h1 className="text-2xl font-bold mb-2">Device Check</h1>
+          <p className="mb-6 text-gray-600">Verify your camera and microphone before starting.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="aspect-video rounded-xl overflow-hidden bg-black">
+              <UserVideo />
+            </div>
+            <div className="flex flex-col items-center justify-center p-4">
+              <p className="text-gray-700 mb-2">Microphone Level</p>
+              <div className="w-full h-4 bg-gray-200 rounded">
+                <div className="h-4 bg-green-500 rounded" style={{ width: `${Math.round(micLevel * 100)}%` }} />
+              </div>
+              <p className="text-sm text-gray-500 mt-2">Speak to see the meter move</p>
+              <div className="mt-4 text-sm">
+                <p className={cameraReady ? 'text-green-700' : 'text-red-700'}>
+                  Camera: {cameraReady ? 'Ready' : 'Not detected'}
+                </p>
+                <p className={(micLevel > 0.05) ? 'text-green-700' : 'text-red-700'}>
+                  Microphone: {(micLevel > 0.05) ? 'Receiving audio' : 'No input detected'}
+                </p>
+              </div>
+            </div>
+          </div>
+          <div className="mt-6 flex justify-center gap-3">
+            <button onClick={() => setScreen('pre_notes')} disabled={!cameraReady || micLevel <= 0.05} className={`font-semibold px-6 py-2 rounded-lg ${(!cameraReady || micLevel <= 0.05) ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}>
+              Continue
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (screen === 'pre_notes') {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-100">
+        <div className="p-8 bg-white rounded-lg shadow-xl text-left w-full max-w-2xl">
+          <h1 className="text-2xl font-bold mb-4">Before You Begin</h1>
+          <ul className="list-disc pl-6 text-gray-700 space-y-2">
+            <li>Choose a quiet, well‑lit space. Sit centered and look into the camera.</li>
+            <li>Speak clearly at a moderate pace. Avoid background noise or echo.</li>
+            <li>Use Start/Stop to control recording. Wait for prompts before answering.</li>
+            <li>Keep your face visible; avoid covering your mouth while speaking.</li>
+            <li>Ensure a stable internet connection and close bandwidth‑heavy apps.</li>
+          </ul>
+          <div className="mt-6 flex items-center gap-3">
+            <input id="agree" type="checkbox" className="w-4 h-4" onChange={(e) => setAgreed(e.target.checked)} />
+            <label htmlFor="agree" className="text-gray-700">I have read and I'm ready to start.</label>
+          </div>
+          <div className="mt-6">
+            <button onClick={() => beginInterview()} className="bg-blue-600 text-white font-semibold px-6 py-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400" disabled={!agreed}>Start Interview</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (screen === 'welcome') {
     return (
@@ -277,7 +469,6 @@ export default function Home() {
                 </p>
                 <button 
                     onClick={handleToggleRecording}
-                    // This is the corrected logic
                     disabled={interviewState !== 'listening_to_answer'}
                     className={`font-semibold px-6 py-2 rounded-lg transition-colors ${
                         isRecording 

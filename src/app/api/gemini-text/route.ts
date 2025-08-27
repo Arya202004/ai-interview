@@ -1,17 +1,29 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+if (!process.env.GEMINI_API_KEY) {
+  console.error("[gemini-text] Missing GEMINI_API_KEY environment variable.");
+}
+
+const genAI = process.env.GEMINI_API_KEY
+  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  : null as any;
+
+const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || 'gemini-1.5-flash';
 
 export async function POST(req: Request) {
   try {
+    if (!process.env.GEMINI_API_KEY || !genAI) {
+      return NextResponse.json({ error: "Server not configured. Missing GEMINI_API_KEY." }, { status: 500 });
+    }
     const { role, interviewData, task } = await req.json();
 
     if (!task) {
       return NextResponse.json({ error: "Task is required." }, { status: 400 });
     }
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
     let prompt = "";
 
     if (task === 'generate_questions' && role) {
@@ -28,16 +40,36 @@ export async function POST(req: Request) {
     }
     
     if (task === 'generate_questions') {
-      const result = await model.generateContent(prompt);
+      // Retry up to 3 times for transient network errors
+      const attempt = async () => await model.generateContent(prompt);
+      let result;
+      let lastErr: any = null;
+      for (let i = 0; i < 3; i++) {
+        try {
+          result = await attempt();
+          break;
+        } catch (e: any) {
+          lastErr = e;
+          // Backoff: 300ms, 800ms
+          await new Promise(r => setTimeout(r, i === 0 ? 300 : 800));
+        }
+      }
+      if (!result && lastErr) throw lastErr;
       const responseText = result.response.text();
       const jsonMatch = responseText.match(/\{[\s\S]*\}/);
       if (!jsonMatch) throw new Error("No valid JSON object in Gemini's response.");
       return NextResponse.json(JSON.parse(jsonMatch[0]));
     } else { // Streaming for feedback
-      const result = await model.generateContentStream(prompt);
+      // Retry streaming once on network error
+      let streamResult;
+      try {
+        streamResult = await model.generateContentStream(prompt);
+      } catch (e) {
+        streamResult = await model.generateContentStream(prompt);
+      }
       const stream = new ReadableStream({
           async start(controller) {
-              for await (const chunk of result.stream) {
+              for await (const chunk of streamResult.stream) {
                   const chunkText = chunk.text();
                   controller.enqueue(chunkText);
               }
@@ -46,9 +78,13 @@ export async function POST(req: Request) {
       });
       return new Response(stream);
     }
-  } catch (error) {
-    console.error("SERVER LOG: Error in gemini-text route:", error);
-    const errorMessage = error instanceof Error ? error.message : "An unknown error occurred";
-    return NextResponse.json({ error: errorMessage }, { status: 500 });
+  } catch (error: any) {
+    const errMsg = error?.message || "Unknown error";
+    const details = error?.errorDetails || undefined;
+    console.error("SERVER LOG: Error in gemini-text route:", errMsg, details || "");
+    const clientMessage = /API key not valid|API_KEY_INVALID/i.test(errMsg)
+      ? "Gemini API key is invalid. Please set a valid GEMINI_API_KEY in .env.local and restart."
+      : errMsg;
+    return NextResponse.json({ error: clientMessage }, { status: 500 });
   }
 }

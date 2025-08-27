@@ -2,10 +2,10 @@
 import { useState, useRef } from 'react';
 import OpusMediaRecorder from 'opus-media-recorder';
 
+// Align paths with assets placed in /public (use OGG encoder which we ship)
 const workerOptions = {
-    encoderWorkerPath: '/opus-media-recorder/encoderWorker.umd.js',
-    OggOpusEncoderWasmPath: '/opus-media-recorder/OggOpusEncoder.wasm',
-    WebMOpusEncoderWasmPath: '/opus-media-recorder/WebMOpusEncoder.wasm',
+    encoderWorkerPath: '/encoderWorker.umd.js',
+    OggOpusEncoderWasmPath: '/OggOpusEncoder.wasm',
 };
 
 export function useAudioRecorder() {
@@ -18,7 +18,8 @@ export function useAudioRecorder() {
     if (isRecording) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new OpusMediaRecorder(stream, { mimeType: 'audio/wav' }, workerOptions);
+      // Prefer OpusMediaRecorder with OGG container (matches shipped OggOpusEncoder.wasm)
+      const mediaRecorder = new OpusMediaRecorder(stream, { mimeType: 'audio/ogg;codecs=opus' }, workerOptions);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
       mediaRecorder.ondataavailable = (event: BlobEvent) => {
@@ -26,11 +27,32 @@ export function useAudioRecorder() {
           audioChunksRef.current.push(event.data);
         }
       };
+      mediaRecorder.onerror = (e: unknown) => {
+        console.error('[Recorder] OpusMediaRecorder error:', e);
+      };
       mediaRecorder.start();
       setIsRecording(true);
-      console.log("LOG: Recording started with OpusMediaRecorder.");
+      console.log('[Recorder] Recording started with OpusMediaRecorder (audio/ogg;codecs=opus).');
     } catch (error) {
-      console.error("Error starting recording:", error);
+      console.warn('[Recorder] Falling back to native MediaRecorder due to error:', error);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mime = MediaRecorder.isTypeSupported('audio/ogg;codecs=opus') ? 'audio/ogg;codecs=opus' : 'audio/webm;codecs=opus';
+        const mediaRecorder = new MediaRecorder(stream, { mimeType: mime });
+        // @ts-expect-error widen type for unified handling
+        mediaRecorderRef.current = mediaRecorder as unknown as OpusMediaRecorder;
+        audioChunksRef.current = [];
+        mediaRecorder.ondataavailable = (event: BlobEvent) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+        mediaRecorder.start();
+        setIsRecording(true);
+        console.log('[Recorder] Recording started with native MediaRecorder (' + mime + ').');
+      } catch (fallbackError) {
+        console.error('[Recorder] Failed to start any recorder:', fallbackError);
+      }
     }
   };
 
@@ -41,8 +63,10 @@ export function useAudioRecorder() {
         return;
       }
       mediaRecorderRef.current.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-        console.log("LOG: Recording stopped. WAV blob created with size:", audioBlob.size);
+        // Determine type from first chunk if available, default to ogg
+        const inferredType = audioChunksRef.current[0]?.type || 'audio/ogg';
+        const audioBlob = new Blob(audioChunksRef.current, { type: inferredType });
+        console.log('[Recorder] Recording stopped. Blob created with type:', inferredType, 'size (bytes):', audioBlob.size);
         mediaRecorderRef.current?.stream.getTracks().forEach((track: MediaStreamTrack) => track.stop());
         setIsRecording(false);
         resolve(audioBlob);

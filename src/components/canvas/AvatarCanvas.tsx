@@ -1,17 +1,18 @@
 'use client';
-
 import dynamic from 'next/dynamic';
 import { Suspense } from 'react';
 
-// Dynamically import the Experience component with SSR turned off
 const Experience = dynamic(
   () => import('@/components/canvas/Experience'),
-  { ssr: false }
+  { 
+    ssr: false,
+    loading: () => <div className="flex items-center justify-center h-full w-full"><p className="text-gray-400">Loading Avatar...</p></div>
+  }
 );
 
 export default function AvatarCanvas() {
   return (
-    <Suspense fallback={<div>Loading...</div>}>
+    <Suspense fallback={null}>
       <Experience />
     </Suspense>
   );

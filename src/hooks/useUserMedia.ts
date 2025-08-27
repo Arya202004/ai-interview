@@ -13,13 +13,14 @@ export function useUserMedia() {
     let stream: MediaStream;
     const enableStream = async () => {
       try {
+        // Only request video for the preview to avoid double mic capture.
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 1280, height: 720 }, // Request HD video
-          audio: true, // Request audio as well
+          video: { width: 1280, height: 720 },
+          audio: false,
         });
         setMediaStream(stream);
       } catch (err) {
-        console.error("Error accessing media devices.", err);
+        console.error("[UserMedia] Error accessing media devices.", err);
       }
     };
 
