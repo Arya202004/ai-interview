@@ -3,8 +3,6 @@
 
 A professional AI-powered interview application featuring real-time 3D avatar interactions, speech-to-text transcription, and intelligent question management. Built with Next.js 15, React Three Fiber, and Google AI services.
 
-![AI Interview Assistant](https://via.placeholder.com/800x400/2563eb/ffffff?text=AI+Interview+Assistant+Demo)
-
 ## 🚀 Features
 
 ### Core Capabilities
