@@ -11,7 +11,7 @@ interface AvatarState {
   isClockPlaying: boolean;
   // Live speech amplitude (0..1) derived from audio analyser
   amplitude: number;
-  playAudioWithVisemes: (audioBlob: Blob, visemes: Viseme[]) => void;
+  playAudioWithVisemes: (audioBlob: Blob, visemes: Viseme[], onEnded?: () => void) => void;
   playVisemesOnly: (visemes: Viseme[]) => void;
   stopAudio: () => void;
 }
@@ -24,11 +24,11 @@ export const useAvatarStore = create<AvatarState>((set, get) => ({
   clockStartTime: null,
   isClockPlaying: false,
   amplitude: 0,
-  playAudioWithVisemes: (audioBlob, visemes) => {
+  playAudioWithVisemes: (audioBlob, visemes, onEnded) => {
     const currentAudio = get().audio;
     if (currentAudio) {
-      currentAudio.pause();
-      currentAudio.src = '';
+      try { currentAudio.pause(); } catch {}
+      try { currentAudio.src = ''; } catch {}
     }
     
     const audioUrl = URL.createObjectURL(audioBlob);
@@ -51,21 +51,18 @@ export const useAvatarStore = create<AvatarState>((set, get) => ({
         const tick = () => {
           if (!analyser) return;
           analyser.getByteTimeDomainData(buffer);
-          // Compute RMS amplitude 0..1
           let sum = 0;
           for (let i = 0; i < buffer.length; i++) {
             const v = (buffer[i] - 128) / 128;
             sum += v * v;
           }
           const rms = Math.sqrt(sum / buffer.length);
-          // Smooth and clamp
           const weight = Math.min(1, Math.max(0, rms * 2.2));
           set({ amplitude: weight });
           rafId = requestAnimationFrame(tick);
         };
         rafId = requestAnimationFrame(tick);
       } catch (err) {
-        // If analyser fails, keep amplitude at baseline
         console.warn('[Avatar] Failed to start audio analyser:', err);
         set({ amplitude: 0.0 });
       }
@@ -80,16 +77,26 @@ export const useAvatarStore = create<AvatarState>((set, get) => ({
       if (rafId) cancelAnimationFrame(rafId);
       try { source?.disconnect(); analyser?.disconnect(); audioContext?.close(); } catch {}
       set({ audio: null, visemes: [], isPlaying: false, isClockPlaying: false, clockStartTime: null, amplitude: 0 });
+      try { URL.revokeObjectURL(audioUrl); } catch {}
+      try { onEnded && onEnded(); } catch {}
     };
 
-    audio.play();
+    const doPlay = async () => {
+      try {
+        await audio.play();
+      } catch (e) {
+        // If play fails due to immediate pause, ignore
+        console.warn('[Avatar] audio.play() rejected:', e);
+      }
+    };
+    doPlay();
     set({ audio, visemes });
   },
   playVisemesOnly: (visemes) => {
     const currentAudio = get().audio;
     if (currentAudio) {
-      currentAudio.pause();
-      currentAudio.src = '';
+      try { currentAudio.pause(); } catch {}
+      try { currentAudio.src = ''; } catch {}
     }
     const nowSeconds = Date.now() / 1000;
     set({ audio: null, visemes, isPlaying: true, startTime: nowSeconds, isClockPlaying: true, clockStartTime: nowSeconds, amplitude: 0.6 });
@@ -97,12 +104,9 @@ export const useAvatarStore = create<AvatarState>((set, get) => ({
   stopAudio: () => {
     const currentAudio = get().audio;
     if (currentAudio) {
-      try {
-        currentAudio.pause();
-      } catch {}
-      currentAudio.src = '';
+      try { currentAudio.pause(); } catch {}
+      try { currentAudio.src = ''; } catch {}
     }
-    // Collapse to a single state update
     set({ audio: null, visemes: [], isPlaying: false, isClockPlaying: false, clockStartTime: null, amplitude: 0 });
   }
 }));

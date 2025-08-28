@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     }
 
     const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
-    const model = genAI.getGenerativeModel({ model: TEXT_MODEL });
+
     let prompt = "";
 
     if (task === 'generate_questions' && role) {

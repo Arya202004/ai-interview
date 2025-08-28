@@ -5,7 +5,7 @@ import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import AvatarCanvas from "@/components/canvas/AvatarCanvas";
 import UserVideo from "@/components/UserVideo";
-import { useAudioRecorder } from "@/hooks/useAudioRecorder"; 
+import { useWebSpeechStt } from "@/hooks/useWebSpeechStt";
 import { useAvatarStore } from '@/store/avatarStore'; // Correctly import the main store hook
 import { generateVisemes } from '@/lib/lipsync'; // Correctly import the viseme generator
 
@@ -25,15 +25,50 @@ export default function Home() {
   const [aiResponse, setAiResponse] = useState("");
   const [userTranscript, setUserTranscript] = useState("");
   const [feedback, setFeedback] = useState("");
-  const { isRecording, startRecording, stopRecording } = useAudioRecorder();
+  const [listeningSeconds, setListeningSeconds] = useState(0);
+  const listeningTimerRef = useRef<number | null>(null);
+  const [pendingAnswer, setPendingAnswer] = useState<string | null>(null);
+  // Legacy recorder kept for fallback; primary path uses streaming STT
+  // Use Web Speech API for real-time transcription
+  const { start: startStt, stop: stopStt, isStreaming: isSttStreaming, transcript: sttTranscript, finals: sttFinals, level: sttLevel, clearTranscript } = useWebSpeechStt({ 
+    languageCode: 'en-US', 
+    continuous: true,
+    interimResults: true,
+    silenceMs: 10000, 
+    onAutoStop: (finalText) => {
+      const userAnswer = (finalText || '').trim();
+      setPendingAnswer(userAnswer || '');
+      stopListeningTimer();
+    }
+  });
   const feedbackReportRef = useRef<HTMLDivElement>(null);
   const [agreed, setAgreed] = useState(false);
   // Device check (audio meter)
   const [micLevel, setMicLevel] = useState(0);
+  const [micPass, setMicPass] = useState(false);
+  const micConsecutiveRef = useRef(0);
   const micStreamRef = useRef<MediaStream | null>(null);
   const micAnalyzerCleanupRef = useRef<() => void>(() => {});
   const [cameraReady, setCameraReady] = useState(false);
   const cameraStreamRef = useRef<MediaStream | null>(null);
+  const [expandedCards, setExpandedCards] = useState<Record<number, boolean>>({});
+  const toggleCard = useCallback((idx: number) => {
+    setExpandedCards(prev => ({ ...prev, [idx]: !prev[idx] }));
+  }, []);
+  const exportHistory = useCallback((as: 'txt'|'json') => {
+    const answered = interviewData.slice(0, currentQuestionIndex).map((t, i) => ({ index: i+1, question: t.question, answer: t.userAnswer || '' }));
+    if (as === 'json') {
+      const blob = new Blob([JSON.stringify(answered, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'transcript.json'; a.click(); URL.revokeObjectURL(url);
+    } else {
+      const lines = answered.map(a => `Q${a.index}: ${a.question}\nA: ${a.answer}\n`).join('\n');
+      const blob = new Blob([lines], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'transcript.txt'; a.click(); URL.revokeObjectURL(url);
+    }
+  }, [interviewData, currentQuestionIndex]);
+  const [showCountdown, setShowCountdown] = useState<number | null>(null);
+  const questionSpokenRef = useRef<number | null>(null);
+  const isSpeakingRef = useRef<boolean>(false);
 
   // --- CORRECTED STORE USAGE ---
   const playAudioWithVisemes = useAvatarStore((state) => state.playAudioWithVisemes);
@@ -41,38 +76,82 @@ export default function Home() {
   const stopAudio = useAvatarStore((state) => state.stopAudio);
 
   // --- CORE FUNCTIONS ---
-  const speak = useCallback(async (text: string, onEndCallback: () => void = () => {}) => {
-    setAiResponse(text);
-    stopAudio(); // This will now work correctly
-    const visemes = generateVisemes(text);
+  const startListeningWithCountdown = useCallback(async () => {
+    setShowCountdown(3);
+    const tick = (n: number) => {
+      if (n <= 1) {
+        setShowCountdown(null);
+        setListeningSeconds(0);
+        if (listeningTimerRef.current) window.clearInterval(listeningTimerRef.current);
+        listeningTimerRef.current = window.setInterval(() => setListeningSeconds((s) => s + 1), 1000) as any as number;
+        startStt();
+      } else {
+        setTimeout(() => tick(n - 1), 1000);
+      }
+    };
+    setTimeout(() => tick(3), 1000);
+  }, [startStt]);
 
-    // TTS provider switch via env
-    const provider = process.env.NEXT_PUBLIC_TTS_PROVIDER || 'browser';
+  const speak = useCallback(async (text: string, onEndCallback: () => void = () => {}) => {
+    if (isSpeakingRef.current) return;
+    isSpeakingRef.current = true;
+    setAiResponse(text);
+    stopAudio();
+    const visemes = generateVisemes(text);
+    
+    let currentText = '';
+    const showProgress = () => {
+      if (currentText.length < text.length) {
+        currentText = text.substring(0, currentText.length + 1);
+        setAiResponse(currentText);
+        if (currentText.length < text.length) {
+          setTimeout(showProgress, 50);
+        }
+      }
+    };
+    showProgress();
+
+    const finishSpeaking = () => {
+      isSpeakingRef.current = false;
+      try { onEndCallback(); } catch {}
+    };
+
     try {
-      if (provider === 'google' || provider === 'opentts') {
+      const ttsCall = async (attempt = 1): Promise<Response> => {
         const res = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
         });
-        if (res.ok) {
-          const arrayBuf = await res.arrayBuffer();
-          const contentType = res.headers.get('Content-Type') || 'audio/mpeg';
-          const audioBlob = new Blob([arrayBuf], { type: contentType });
-          playAudioWithVisemes(audioBlob, visemes);
-          onEndCallback();
-          return;
+        if (!res.ok && attempt < 3) {
+          await new Promise(r => setTimeout(r, attempt * 300));
+          return ttsCall(attempt + 1);
         }
+        return res;
+      };
+      try { await stopStt(); } catch {}
+      const res = await ttsCall();
+      if (res.ok) {
+        const arrayBuf = await res.arrayBuffer();
+        const contentType = res.headers.get('Content-Type') || 'audio/mpeg';
+        const audioBlob = new Blob([arrayBuf], { type: contentType });
+        playAudioWithVisemes(audioBlob, visemes, () => {
+          startListeningWithCountdown();
+          finishSpeaking();
+        });
+        return;
+      } else {
+        console.error('[TTS] Google TTS failed with status:', res.status);
+        const errorText = await res.text().catch(() => 'Unknown error');
+        console.error('[TTS] Error details:', errorText);
       }
     } catch (err) {
-      console.warn('[TTS] Google TTS failed, falling back to browser TTS.', err);
+      console.error('[TTS] Google TTS request failed:', err);
     }
 
-    // Fallback: browser SpeechSynthesis
     if (typeof window !== 'undefined' && window.speechSynthesis) {
       playVisemesOnly(visemes);
       const utterance = new SpeechSynthesisUtterance(text);
-      // Prefer Indian English male if available, else closest English
       const pickVoice = () => {
         const voices = window.speechSynthesis.getVoices();
         const byLang = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('en-in'));
@@ -84,8 +163,9 @@ export default function Home() {
       const assignVoice = () => {
         const v = pickVoice();
         if (v) utterance.voice = v;
-        utterance.rate = 0.95; // slightly slower, clearer
-        utterance.pitch = 0.95; // slightly lower for male tone
+        utterance.rate = 0.9; 
+        utterance.pitch = 0.8; 
+        utterance.onend = () => { startListeningWithCountdown(); finishSpeaking(); };
         window.speechSynthesis.speak(utterance);
       };
       if (window.speechSynthesis.getVoices().length === 0) {
@@ -93,11 +173,12 @@ export default function Home() {
       } else {
         assignVoice();
       }
-      utterance.onend = onEndCallback;
-    } else {
-      onEndCallback();
+      return;
     }
-  }, [playAudioWithVisemes, playVisemesOnly, stopAudio]);
+
+    startListeningWithCountdown();
+    finishSpeaking();
+  }, [generateVisemes, stopAudio, stopStt, playAudioWithVisemes, playVisemesOnly, startListeningWithCountdown]);
   
   const handleNameSubmit = useCallback((e: React.FormEvent) => { e.preventDefault(); if (userName.trim()) setScreen("role_selection"); }, [userName]);
   
@@ -162,19 +243,59 @@ export default function Home() {
     }
   }, [currentQuestionIndex]);
   
+  // Primary answer flow using streaming STT; falls back to recorder if STT fails
   const handleToggleRecording = useCallback(async () => {
-    if (isRecording) {
-      const audioBlob = await stopRecording();
-      if (audioBlob && audioBlob.size > 2000) {
-        await processAnswer(audioBlob);
+    try {
+      if (isSttStreaming) {
+        await stopStt();
+        const finalText = (sttFinals && sttFinals.length > 0) ? sttFinals.join(' ').trim() : sttTranscript;
+        const userAnswer = finalText.trim();
+        if (userAnswer) {
+          setInterviewData(prevData => {
+            const updatedData = [...prevData];
+            updatedData[currentQuestionIndex].userAnswer = userAnswer;
+            return updatedData;
+          });
+          setUserTranscript(userAnswer);
+        }
+        setCurrentQuestionIndex(prev => prev + 1);
       } else {
-        console.log("LOG: Recording too short or silent.");
+        setUserTranscript("");
+        await startStt();
       }
-    } else {
-      setUserTranscript(""); 
-      startRecording();
+    } catch (e) {
+      console.warn('[AnswerFlow] STT failed, falling back to recorder', e);
+      // No recorder fallback logic as we are using Web Speech API
     }
-  }, [isRecording, processAnswer, startRecording, stopRecording]);
+  }, [isSttStreaming, stopStt, sttFinals, sttTranscript, currentQuestionIndex, startStt, processAnswer]);
+
+  // Auto-start/stop STT based on interview state - only start after interviewer finishes
+  useEffect(() => {
+    const run = async () => {
+      try {
+        if (interviewState === 'listening_to_answer' && !isSttStreaming) {
+          // STT will be started by speak() on TTS end via onEndCallback.
+          // No eager start here.
+        }
+        if (interviewState !== 'listening_to_answer' && isSttStreaming) {
+          console.log('[Interview] Stopping STT - no longer listening for answer');
+          await stopStt();
+          stopListeningTimer();
+        }
+      } catch (e) {
+        console.warn('[STT] auto toggle error', e);
+      }
+    };
+    run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interviewState]);
+
+  const stopListeningTimer = () => {
+    if (listeningTimerRef.current) {
+      window.clearInterval(listeningTimerRef.current);
+      listeningTimerRef.current = null;
+    }
+  };
 
   const generateFeedback = useCallback(async () => {
     try {
@@ -234,17 +355,26 @@ export default function Home() {
   useEffect(() => {
     if (screen === 'interviewing' && interviewData.length > 0) {
       if (currentQuestionIndex >= interviewData.length) {
-        setScreen("generating_feedback");
-        speak("Thank you. The interview is now complete. Please wait while I generate your feedback.", () => {
-          generateFeedback();
-        });
+        if (questionSpokenRef.current !== currentQuestionIndex) {
+          questionSpokenRef.current = currentQuestionIndex;
+          setScreen("generating_feedback");
+          speak("Thank you. The interview is now complete. Please wait while I generate your feedback.", () => {
+            generateFeedback();
+          });
+        }
       } else {
-        setInterviewState("asking_question");
-        const currentQuestion = interviewData[currentQuestionIndex].question;
-        speak(currentQuestion, () => setInterviewState("listening_to_answer"));
+        if (questionSpokenRef.current !== currentQuestionIndex) {
+          questionSpokenRef.current = currentQuestionIndex;
+          setInterviewState("asking_question");
+          // Clear per-question transcripts to avoid appending across questions
+          try { clearTranscript(); } catch {}
+          setUserTranscript('');
+          const currentQuestion = interviewData[currentQuestionIndex].question;
+          speak(currentQuestion, () => setInterviewState("listening_to_answer"));
+        }
       }
     }
-  }, [screen, interviewData, currentQuestionIndex, speak, generateFeedback]);
+  }, [screen, interviewData, currentQuestionIndex, speak, generateFeedback, clearTranscript]);
 
   // Device check: start mic analyzer
   useEffect(() => {
@@ -272,7 +402,16 @@ export default function Home() {
             sum += v * v;
           }
           const rms = Math.sqrt(sum / buffer.length);
-          setMicLevel(Math.min(1, rms * 3));
+          const level = Math.min(1, rms * 3);
+          setMicLevel(level);
+          const threshold = 0.12; // speak "hello" to exceed this
+          if (level > threshold) {
+            micConsecutiveRef.current += 1;
+          } else {
+            micConsecutiveRef.current = Math.max(0, micConsecutiveRef.current - 1);
+          }
+          // require ~20 consecutive animation frames (~330ms) above threshold
+          if (micConsecutiveRef.current >= 20) setMicPass(true);
           rafId = requestAnimationFrame(tick);
         };
         rafId = requestAnimationFrame(tick);
@@ -325,19 +464,19 @@ export default function Home() {
               <div className="w-full h-4 bg-gray-200 rounded">
                 <div className="h-4 bg-green-500 rounded" style={{ width: `${Math.round(micLevel * 100)}%` }} />
               </div>
-              <p className="text-sm text-gray-500 mt-2">Speak to see the meter move</p>
+              <p className="text-sm text-gray-500 mt-2">Say "hello" loudly — the bar should jump</p>
               <div className="mt-4 text-sm">
                 <p className={cameraReady ? 'text-green-700' : 'text-red-700'}>
                   Camera: {cameraReady ? 'Ready' : 'Not detected'}
                 </p>
-                <p className={(micLevel > 0.05) ? 'text-green-700' : 'text-red-700'}>
-                  Microphone: {(micLevel > 0.05) ? 'Receiving audio' : 'No input detected'}
+                <p className={(micPass) ? 'text-green-700' : 'text-red-700'}>
+                  Microphone: {micPass ? 'Test passed' : 'Say "hello" to test'}
                 </p>
               </div>
             </div>
           </div>
           <div className="mt-6 flex justify-center gap-3">
-            <button onClick={() => setScreen('pre_notes')} disabled={!cameraReady || micLevel <= 0.05} className={`font-semibold px-6 py-2 rounded-lg ${(!cameraReady || micLevel <= 0.05) ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}>
+            <button onClick={() => setScreen('pre_notes')} disabled={!cameraReady || !micPass} className={`font-semibold px-6 py-2 rounded-lg ${(!cameraReady || !micPass) ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}>
               Continue
             </button>
           </div>
@@ -447,37 +586,138 @@ export default function Home() {
                 Question {currentQuestionIndex + 1} / {interviewData.length}
                 </p>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="relative aspect-video rounded-xl overflow-hidden shadow-md">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="relative aspect-video rounded-xl overflow-hidden shadow-md lg:col-span-2">
                     <div className="bg-black w-full h-full"><AvatarCanvas /></div>
+                    {showCountdown !== null && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+                        <div className="px-4 py-2 rounded-full bg-white text-gray-900 font-semibold shadow">
+                          Listening in {showCountdown}…
+                        </div>
+                      </div>
+                    )}
                     <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 to-transparent">
-                        <p className="text-white text-lg font-medium">{aiResponse}</p>
+                        <p className="text-white text-xs uppercase tracking-wide opacity-75">Interviewer</p>
+                        <p className="text-white text-lg font-medium mt-1">{aiResponse}</p>
                     </div>
                 </div>
-                <div className="relative aspect-video rounded-xl bg-gray-200 shadow-md flex items-center justify-center overflow-hidden">
+                <div className="lg:col-span-1 flex flex-col gap-4">
+                  <div className="relative aspect-video rounded-xl bg-gray-200 shadow-md overflow-hidden">
                     <UserVideo /> 
                     <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 to-transparent">
-                        <p className="text-white text-lg font-medium">{userTranscript}</p>
+                        <p className="text-white text-xs uppercase tracking-wide opacity-75">Interviewee</p>
+                        <p className="text-white text-lg font-medium mt-1">{isSttStreaming ? sttTranscript : userTranscript}</p>
                     </div>
+                  </div>
+                  <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+                    <div className="p-3 border-b border-gray-100 bg-white z-10 flex items-center justify-between">
+                      <p className="text-sm font-semibold text-gray-700">Transcript History</p>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => exportHistory('txt')} className="text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50">Export TXT</button>
+                        <button onClick={() => exportHistory('json')} className="text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-50">Export JSON</button>
+                      </div>
+                    </div>
+                    <div className="p-3 overflow-y-auto" style={{ maxHeight: '260px' }}>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {interviewData.slice(0, currentQuestionIndex).map((turn, idx) => (
+                          <div key={idx} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="text-xs font-semibold text-gray-600">Q{idx + 1}</div>
+                              <button onClick={() => toggleCard(idx)} className="text-xs px-2 py-1 rounded border border-gray-200 hover:bg-gray-100">
+                                {expandedCards[idx] ? 'Collapse' : 'Expand'}
+                              </button>
+                            </div>
+                            <div className={`${expandedCards[idx] ? '' : 'line-clamp-2'} text-sm text-gray-800`}>{turn.question}</div>
+                            <div className="mt-2 text-xs uppercase tracking-wide text-gray-500">Answer</div>
+                            <div className={`${expandedCards[idx] ? '' : 'line-clamp-2'} text-sm text-gray-700`}>
+                              {turn.userAnswer && turn.userAnswer.trim().length > 0 ? turn.userAnswer : <span className="opacity-60">(no answer)</span>}
+                            </div>
+                          </div>
+                        ))}
+                        {currentQuestionIndex === 0 && (
+                          <div className="text-xs text-gray-500">Answers will appear here after each question.</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
             </div>
             <footer className="mt-6 flex justify-between items-center bg-gray-100 rounded-lg p-4 min-h-[80px]">
-                <p className="text-gray-600 font-medium">
+                <div className="flex items-center gap-3">
+                  <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
+                    interviewState === 'asking_question' ? 'bg-blue-100 text-blue-700' :
+                    interviewState === 'listening_to_answer' ? 'bg-green-100 text-green-700' :
+                    interviewState === 'processing_answer' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-700'
+                  }`}>
+                    <span className={`inline-block w-2 h-2 rounded-full ${
+                      interviewState === 'asking_question' ? 'bg-blue-500' :
+                      interviewState === 'listening_to_answer' ? 'bg-green-500' :
+                      interviewState === 'processing_answer' ? 'bg-yellow-500' : 'bg-gray-400'
+                    }`} />
+                    {interviewState === 'asking_question' && 'Ready'}
+                    {interviewState === 'listening_to_answer' && 'Listening'}
+                    {interviewState === 'processing_answer' && 'Processing'}
+                    {interviewState === 'idle' && 'Ready'}
+                  </span>
+                  <p className="text-gray-600 font-medium">
                     {interviewState === 'asking_question' && 'Interviewer is speaking...'}
-                    {interviewState === 'listening_to_answer' && (isRecording ? 'Recording your answer...' : 'Ready for your answer.')}
+                    {interviewState === 'listening_to_answer' && (isSttStreaming ? `Listening… ${listeningSeconds}s (auto-stops after 10s silence)` : 'Waiting for interviewer to finish...')}
                     {interviewState === 'processing_answer' && 'Processing your answer...'}
-                </p>
-                <button 
-                    onClick={handleToggleRecording}
-                    disabled={interviewState !== 'listening_to_answer'}
-                    className={`font-semibold px-6 py-2 rounded-lg transition-colors ${
-                        isRecording 
-                        ? 'bg-red-500 hover:bg-red-600' 
-                        : 'bg-green-500 hover:bg-green-600'
-                    } text-white disabled:bg-gray-400 disabled:cursor-not-allowed`}
-                >
-                    {isRecording ? 'Stop Recording' : 'Start Recording'}
-                </button>
+                  </p>
+                </div>
+                {interviewState === 'listening_to_answer' && (
+                  <div className="flex items-center gap-2 mr-4">
+                    <div className="w-24 h-2 bg-gray-300 rounded">
+                      <div className="h-2 bg-green-500 rounded" style={{ width: `${Math.round((sttLevel || 0) * 100)}%` }} />
+                    </div>
+                    <span className="text-xs text-gray-600">Mic</span>
+                  </div>
+                )}
+                {pendingAnswer === null ? (
+                  <div className="flex items-center gap-2">
+                    <button 
+                        onClick={handleToggleRecording}
+                        disabled={interviewState !== 'listening_to_answer'}
+                        className={`font-semibold px-6 py-2 rounded-lg transition-colors ${
+                            isSttStreaming 
+                            ? 'bg-red-500 hover:bg-red-600' 
+                            : 'bg-green-500 hover:bg-green-600'
+                        } text-white disabled:bg-gray-400 disabled:cursor-not-allowed`}
+                    >
+                        {isSttStreaming ? 'Stop' : 'Start'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => {
+                        const ans = (pendingAnswer || '').trim();
+                        if (ans) {
+                          setInterviewData(prev => {
+                            const updated = [...prev];
+                            updated[currentQuestionIndex].userAnswer = ans;
+                            return updated;
+                          });
+                          setUserTranscript(ans);
+                        }
+                        setPendingAnswer(null);
+                        setCurrentQuestionIndex(prev => prev + 1);
+                      }}
+                      className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white font-semibold"
+                    >Use answer</button>
+                    <button
+                      onClick={async () => {
+                        setPendingAnswer(null);
+                        setUserTranscript('');
+                        setListeningSeconds(0);
+                        await startStt();
+                        if (listeningTimerRef.current) window.clearInterval(listeningTimerRef.current);
+                        listeningTimerRef.current = window.setInterval(() => setListeningSeconds((s) => s + 1), 1000) as any as number;
+                      }}
+                      className="px-4 py-2 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold"
+                    >Re-record</button>
+                  </div>
+                )}
             </footer>
         </>
       )}

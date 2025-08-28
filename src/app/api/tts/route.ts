@@ -6,9 +6,9 @@ async function synthesizeGoogle(text: string): Promise<Response> {
   const apiKey = process.env.GOOGLE_TTS_API_KEY;
   if (!apiKey) return new NextResponse('Missing GOOGLE_TTS_API_KEY', { status: 500 });
   const languageCode = process.env.GOOGLE_TTS_LANGUAGE_CODE || 'en-IN';
-  const voiceName = process.env.GOOGLE_TTS_VOICE || 'en-IN-Standard-D'; // male
-  const speakingRate = parseFloat(process.env.GOOGLE_TTS_RATE || '0.95');
-  const pitch = parseFloat(process.env.GOOGLE_TTS_PITCH || '-1.0');
+  const voiceName = process.env.GOOGLE_TTS_VOICE || 'en-IN-Wavenet-D'; // Indian male voice
+  const speakingRate = parseFloat(process.env.GOOGLE_TTS_RATE || '0.9');
+  const pitch = parseFloat(process.env.GOOGLE_TTS_PITCH || '-2.0'); // Deeper male voice
   const audioEncoding = process.env.GOOGLE_TTS_AUDIO_ENCODING || 'MP3';
 
   const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(apiKey)}`;
@@ -30,10 +30,10 @@ async function synthesizeGoogle(text: string): Promise<Response> {
 
 async function synthesizeOpenTTS(text: string): Promise<Response> {
   const base = process.env.OPENTTS_URL; // e.g., http://localhost:5500 or any OpenTTS-compatible server
-  const voice = process.env.OPENTTS_VOICE || 'en_US-lessac';
+  const voice = process.env.OPENTTS_VOICE || 'larynx/cmu_fem_flow_tts'; // map for OpenTTS voice id
   if (!base) return new NextResponse('Missing OPENTTS_URL', { status: 500 });
-  const q = new URLSearchParams({ text, voice });
-  const url = `${base.replace(/\/$/, '')}/api/tts?${q.toString()}`;
+  // OpenTTS expects voice in path for some voices, fallback to query for others
+  const url = `${base.replace(/\/$/, '')}/api/tts?${new URLSearchParams({ text, voice }).toString()}`;
   const r = await fetch(url);
   if (!r.ok) return new NextResponse('OpenTTS error', { status: r.status });
   const arrayBuf = await r.arrayBuffer();
@@ -45,10 +45,7 @@ export async function POST(req: Request) {
   try {
     const { text } = await req.json();
     if (!text || typeof text !== 'string') return new NextResponse('Missing text', { status: 400 });
-    const provider = process.env.NEXT_PUBLIC_TTS_PROVIDER || 'browser';
-    if (provider === 'google') return synthesizeGoogle(text);
-    if (provider === 'opentts') return synthesizeOpenTTS(text);
-    return new NextResponse('Provider not handled on server', { status: 400 });
+    return synthesizeGoogle(text);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return new NextResponse('TTS error: ' + message, { status: 500 });
