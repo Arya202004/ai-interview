@@ -600,14 +600,6 @@ git push origin feature/amazing-feature
 
 # Create Pull Request
 ```
-
-### Code Style
-
-- **TypeScript**: Use strict TypeScript configuration
-- **ESLint**: Follow ESLint rules
-- **Prettier**: Use Prettier for code formatting
-- **Conventional Commits**: Follow conventional commit format
-
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -619,24 +611,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Google AI**: For Gemini AI services
 - **Web Speech API**: For speech recognition
 - **Next.js Team**: For the amazing framework
-
-## 📞 Support
-
-### Getting Help
-
-- **Issues**: [GitHub Issues](https://github.com/yourusername/ai-interview/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/ai-interview/discussions)
-- **Documentation**: [Project Wiki](https://github.com/yourusername/ai-interview/wiki)
-
-### Community
-
-- **Discord**: Join our [Discord Server](https://discord.gg/ai-interview)
-- **Twitter**: Follow [@AIInterview](https://twitter.com/AIInterview)
-- **Blog**: Read our [Development Blog](https://blog.ai-interview.com)
-
----
-
-**Made with ❤️ by the AI Interview Team**
-
-*Last updated: December 2024*
-
