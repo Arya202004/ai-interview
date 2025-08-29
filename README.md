@@ -3,6 +3,7 @@
 
 ![Hero Placeholder](https://via.placeholder.com/1280x420/0F172A/FFFFFF?text=AI+Interview+Assistant+with+Real-Time+Proctoring)
 
+<<<<<<< HEAD
 A professional AI interview platform featuring a 3D avatar interviewer, real‑time speech recognition and synthesis, intelligent question management, and secure, real‑time camera and audio proctoring powered by Google Cloud Video Intelligence.
 
 ## Table of Contents
@@ -19,6 +20,9 @@ A professional AI interview platform featuring a 3D avatar interviewer, real‑t
 - Proctoring Details
 - Troubleshooting
 - FAQ
+=======
+## 🚀 Features
+>>>>>>> 312f932c30714df1509deac0129d2c9411eb8945
 
 ## Overview
 - 3D avatar interviewer (React Three Fiber + Three.js)
@@ -147,6 +151,7 @@ GOOGLE_VIDEO_INTELLIGENCE_LOCATION=us-central1
 npm run dev
 # Visit http://localhost:3000
 ```
+<<<<<<< HEAD
 - On first load, allow camera and microphone.
 - Proctoring auto‑starts; violations display in the panel.
 
@@ -171,6 +176,9 @@ npm start
 - Camera analysis: adaptive schedule with exponential backoff on errors (min 3s, max ~20s).
 - Tab visibility aware: slows checks when hidden to preserve quota.
 - Violations are logged with severity (low/medium/high) and shown in the UI.
+=======
+## 📄 License
+>>>>>>> 312f932c30714df1509deac0129d2c9411eb8945
 
 ## Troubleshooting
 - NotAllowedError: ensure camera/microphone allowed; our headers now permit them.
@@ -178,6 +186,7 @@ npm start
 - API quota: adaptive backoff prevents rapid exhaustion; still consider GCP quotas.
 - Health: check `/api/proctoring/health`.
 
+<<<<<<< HEAD
 ## FAQ
 - Q: Can I run without GCP?
   - A: Yes, audio proctoring still works; camera checks will log a configuration violation.
@@ -186,3 +195,12 @@ npm start
 - Q: How can I tune sensitivity?
   - A: Adjust thresholds in `src/hooks/useProctoring.ts`.
 
+=======
+## 🙏 Acknowledgments
+
+- **Three.js Community**: For 3D graphics library
+- **React Three Fiber**: For React integration
+- **Google AI**: For Gemini AI services
+- **Web Speech API**: For speech recognition
+- **Next.js Team**: For the amazing framework
+>>>>>>> 312f932c30714df1509deac0129d2c9411eb8945
