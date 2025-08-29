@@ -5,6 +5,7 @@ import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import AvatarCanvas from "@/components/canvas/AvatarCanvas";
 import UserVideo from "@/components/UserVideo";
+import ProctoringPanel from "@/components/ProctoringPanel";
 import { useWebSpeechStt } from "@/hooks/useWebSpeechStt";
 import { useAvatarStore } from '@/store/avatarStore'; // Correctly import the main store hook
 import { generateVisemes } from '@/lib/lipsync'; // Correctly import the viseme generator
@@ -475,6 +476,11 @@ export default function Home() {
               </div>
             </div>
           </div>
+          
+          {/* Proctoring Status */}
+          <div className="mt-6">
+            <ProctoringPanel />
+          </div>
           <div className="mt-6 flex justify-center gap-3">
             <button onClick={() => setScreen('pre_notes')} disabled={!cameraReady || !micPass} className={`font-semibold px-6 py-2 rounded-lg ${(!cameraReady || !micPass) ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}>
               Continue
@@ -609,6 +615,10 @@ export default function Home() {
                         <p className="text-white text-lg font-medium mt-1">{isSttStreaming ? sttTranscript : userTranscript}</p>
                     </div>
                   </div>
+                  
+                  {/* Proctoring Panel */}
+                  <ProctoringPanel />
+                  
                   <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
                     <div className="p-3 border-b border-gray-100 bg-white z-10 flex items-center justify-between">
                       <p className="text-sm font-semibold text-gray-700">Transcript History</p>
